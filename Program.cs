@@ -1,27 +1,27 @@
-﻿using Microsoft.AspNetCore.Mvc;
+﻿using System.Text;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Configuration;
+using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
 
-// ====== MODELOS / DTOS ======
+// ===================== MODELOS & DTOS =====================
+
 public record Aluno(int Id, string Nome, int Idade, string Email, DateTime DataNascimento);
 
-public record AlunoCreateDto(
-    string Nome,
-    int Idade,
-    string Email,
-    DateTime DataNascimento
-);
+public record AlunoCreateDto(string Nome, int Idade, string Email, DateTime DataNascimento);
+public record AlunoUpdateDto(string Nome, int Idade, string Email, DateTime DataNascimento);
 
-public record AlunoUpdateDto(
-    string Nome,
-    int Idade,
-    string Email,
-    DateTime DataNascimento
-);
+public record Usuario(int Id, string Nome, string Email, string SenhaHash, string Role = "user");
+public record RegisterDto(string Nome, string Email, string Senha);
+public record LoginDto(string Email, string Senha);
+public record TokenDto(string access_token, DateTime expires_at);
 
-// ====== CONTRATO DO REPOSITÓRIO ======
+// ===================== CONTRATOS =====================
+
 public interface IRepository<T>
 {
-    // Métodos que você já tem no seu projeto
     int Inserir(string nome, int idade, string email, DateTime dataNascimento);
     List<Aluno> Listar();
     int Atualizar(int id, string nome, int idade, string email, DateTime dataNascimento);
@@ -30,158 +30,254 @@ public interface IRepository<T>
     void GarantirEsquema();
 }
 
-// ====== SUA IMPLEMENTAÇÃO EXISTENTE ======
-// AlunoRepository: a mesma que você já criou (ADO.NET/SqlClient)
-// (coloque a sua classe AlunoRepository aqui ou no arquivo próprio)
+public interface IUsuarioRepository
+{
+    Usuario? ObterPorEmail(string email);
+    Usuario? ObterPorId(int id);
+    int Criar(string nome, string email, string senhaHash, string role = "user");
+}
+
+public interface IJwtTokenService
+{
+    TokenDto Gerar(Usuario u);
+}
+
+// ===================== IMPLEMENTAÇÕES DE AUTH (SIMPLES) =====================
+// Repo de usuário em memória (troque por SQL quando quiser)
+public class UsuarioRepository : IUsuarioRepository
+{
+    private readonly List<Usuario> _db = new();
+    private int _seq = 1;
+
+    public Usuario? ObterPorEmail(string email) =>
+        _db.FirstOrDefault(u => u.Email.Equals(email, StringComparison.OrdinalIgnoreCase));
+
+    public Usuario? ObterPorId(int id) => _db.FirstOrDefault(u => u.Id == id);
+
+    public int Criar(string nome, string email, string senhaHash, string role = "user")
+    {
+        if (ObterPorEmail(email) is not null)
+            throw new InvalidOperationException("Email já cadastrado.");
+        var u = new Usuario(_seq++, nome, email, senhaHash, role);
+        _db.Add(u);
+        return u.Id;
+    }
+}
+
+public class JwtTokenService : IJwtTokenService
+{
+    private readonly IConfiguration _cfg;
+    public JwtTokenService(IConfiguration cfg) => _cfg = cfg;
+
+    public TokenDto Gerar(Usuario u)
+    {
+        var issuer = _cfg["Jwt:Issuer"] ?? throw new InvalidOperationException("Jwt:Issuer ausente.");
+        var audience = _cfg["Jwt:Audience"] ?? throw new InvalidOperationException("Jwt:Audience ausente.");
+        var key = _cfg["Jwt:Key"] ?? throw new InvalidOperationException("Jwt:Key ausente.");
+        var mins = int.TryParse(_cfg["Jwt:ExpiresMinutes"], out var m) ? m : 60;
+        var expires = DateTime.UtcNow.AddMinutes(mins);
+
+        var claims = new[]
+        {
+            new System.Security.Claims.Claim(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub, u.Id.ToString()),
+            new System.Security.Claims.Claim(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Email, u.Email),
+            new System.Security.Claims.Claim(System.Security.Claims.ClaimTypes.Name, u.Nome),
+            new System.Security.Claims.Claim(System.Security.Claims.ClaimTypes.Role, u.Role)
+        };
+
+        var creds = new SigningCredentials(
+            new SymmetricSecurityKey(Encoding.UTF8.GetBytes(key)),
+            SecurityAlgorithms.HmacSha256);
+
+        var jwt = new System.IdentityModel.Tokens.Jwt.JwtSecurityToken(
+            issuer: issuer,
+            audience: audience,
+            claims: claims,
+            expires: expires,
+            signingCredentials: creds);
+
+        var token = new System.IdentityModel.Tokens.Jwt.JwtSecurityTokenHandler().WriteToken(jwt);
+        return new TokenDto(token, expires);
+    }
+}
+
+// ===================== APP =====================
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Conexão
+// 1) Conexão (vem do appsettings.json)
 var connString = builder.Configuration.GetConnectionString("DefaultConnection")
-                  ?? "Server=localhost;Database=ADOLab;Trusted_Connection=True;TrustServerCertificate=True;";
+    ?? "Server=localhost;Database=ADOLab;Trusted_Connection=True;TrustServerCertificate=True;";
 
-// DI
-builder.Services.AddSingleton<IRepository<Aluno>>(sp =>
+// 2) DI dos repositórios
+// IMPORTANT: Ajuste o namespace/using do seu AlunoRepository
+builder.Services.AddSingleton<IRepository<Aluno>>(_ =>
 {
     var repo = new AlunoRepository(connString);
     repo.GarantirEsquema();
     return repo;
 });
 
+builder.Services.AddSingleton<IUsuarioRepository, UsuarioRepository>();
+builder.Services.AddSingleton<IJwtTokenService, JwtTokenService>();
+
+// 3) Auth/JWT
+var key = builder.Configuration["Jwt:Key"] ?? throw new InvalidOperationException("Configure Jwt:Key");
+var issuer = builder.Configuration["Jwt:Issuer"] ?? throw new InvalidOperationException("Configure Jwt:Issuer");
+var audience = builder.Configuration["Jwt:Audience"] ?? throw new InvalidOperationException("Configure Jwt:Audience");
+
+builder.Services
+    .AddAuthentication("Bearer")
+    .AddJwtBearer("Bearer", o =>
+    {
+        o.TokenValidationParameters = new()
+        {
+            ValidateIssuer = true,
+            ValidateAudience = true,
+            ValidateLifetime = true,
+            ValidIssuer = issuer,
+            ValidAudience = audience,
+            ValidateIssuerSigningKey = true,
+            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(key)),
+            ClockSkew = TimeSpan.FromSeconds(15)
+        };
+    });
+
+builder.Services.AddAuthorization(o =>
+{
+    // Exemplo de política para endpoints admin (usado no DELETE)
+    o.AddPolicy("admin", p => p.RequireRole("admin"));
+});
+
+// 4) Swagger
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>
 {
-    c.SwaggerDoc("v1", new OpenApiInfo { Title = "Alunos API", Version = "v1" });
+    c.SwaggerDoc("v2", new OpenApiInfo { Title = "Alunos API V2 (JWT)", Version = "v2" });
+    c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
+    {
+        Description = "JWT Bearer. Ex.: Bearer {seu_token}",
+        Name = "Authorization",
+        In = ParameterLocation.Header,
+        Type = SecuritySchemeType.ApiKey,
+        Scheme = "Bearer"
+    });
+    c.AddSecurityRequirement(new OpenApiSecurityRequirement
+    {
+        { new OpenApiSecurityScheme{ Reference = new OpenApiReference{ Type = ReferenceType.SecurityScheme, Id = "Bearer"}}, Array.Empty<string>() }
+    });
 });
 
 var app = builder.Build();
 
 app.UseSwagger();
-app.UseSwaggerUI();
+app.UseSwaggerUI(setup => setup.SwaggerEndpoint("/swagger/v2/swagger.json", "v2"));
+
+app.UseAuthentication();
+app.UseAuthorization();
 
 app.MapGet("/", () => Results.Redirect("/swagger")).ExcludeFromDescription();
 
-// ====== GRUPO /api/alunos ======
-var api = app.MapGroup("/api/alunos").WithTags("Alunos");
+// ===================== ROTAS AUTH =====================
 
-// LISTAR
-api.MapGet("/", ([FromServices] IRepository<Aluno> repo) =>
-{
-    var itens = repo.Listar();
-    return Results.Ok(itens);
-})
-.Produces<List<Aluno>>(StatusCodes.Status200OK);
+var auth = app.MapGroup("/api/auth").WithTags("Auth");
 
-// OBTER POR ID
-api.MapGet("/{id:int}", ([FromServices] IRepository<Aluno> repo, int id) =>
+// Registro de usuário
+auth.MapPost("/register", ([FromBody] RegisterDto dto, IUsuarioRepository users) =>
 {
-    var item = repo.Buscar("Id", id).FirstOrDefault();
-    return item is null ? Results.NotFound() : Results.Ok(item);
+    if (string.IsNullOrWhiteSpace(dto.Nome) || string.IsNullOrWhiteSpace(dto.Email) || string.IsNullOrWhiteSpace(dto.Senha))
+        return Results.BadRequest("Nome, Email e Senha são obrigatórios.");
+
+    if (users.ObterPorEmail(dto.Email) is not null)
+        return Results.Conflict("Email já cadastrado.");
+
+    var hash = BCrypt.Net.BCrypt.HashPassword(dto.Senha);
+    // Dica: para ter um admin, troque role para "admin" aqui.
+    var id = users.Criar(dto.Nome.Trim(), dto.Email.Trim(), hash, role: "admin");
+    return Results.Created($"/api/users/{id}", new { id, dto.Nome, dto.Email });
+});
+
+// Login
+auth.MapPost("/login", ([FromBody] LoginDto dto, IUsuarioRepository users, IJwtTokenService tokens) =>
+{
+    var u = users.ObterPorEmail(dto.Email);
+    if (u is null || !BCrypt.Net.BCrypt.Verify(dto.Senha, u.SenhaHash))
+        return Results.Unauthorized();
+
+    var tk = tokens.Gerar(u);
+    return Results.Ok(tk);
+});
+
+// ===================== ROTAS V2 /api/v2/alunos (PROTEGIDAS) =====================
+
+var v2 = app.MapGroup("/api/v2/alunos")
+            .WithTags("Alunos V2")
+            .RequireAuthorization(); // toda a V2 exige Bearer
+
+// Listar
+v2.MapGet("/", (IRepository<Aluno> repo) => Results.Ok(repo.Listar()))
+  .Produces<List<Aluno>>(StatusCodes.Status200OK);
+
+// Detalhe
+v2.MapGet("/{id:int}", (IRepository<Aluno> repo, int id) =>
+{
+    var a = repo.Buscar("Id", id).FirstOrDefault();
+    return a is null ? Results.NotFound() : Results.Ok(a);
 })
 .Produces<Aluno>(StatusCodes.Status200OK)
 .Produces(StatusCodes.Status404NotFound);
 
-// BUSCAR (filtros opcionais)
-api.MapGet("/search", (
-    [FromServices] IRepository<Aluno> repo,
-    string? nome,
-    string? email,
-    int? idade,
-    DateTime? dataNascimento
-) =>
+// Criar
+v2.MapPost("/", (IRepository<Aluno> repo, [FromBody] AlunoCreateDto dto) =>
 {
-    var resultados = new List<Aluno>();
+    if (!Valid(dto, out var err)) return Results.ValidationProblem(err);
 
-    if (!string.IsNullOrWhiteSpace(nome))
-        resultados.AddRange(repo.Buscar("Nome", nome));
-    if (!string.IsNullOrWhiteSpace(email))
-        resultados.AddRange(repo.Buscar("Email", email));
-    if (idade.HasValue)
-        resultados.AddRange(repo.Buscar("Idade", idade.Value));
-    if (dataNascimento.HasValue)
-        resultados.AddRange(repo.Buscar("DataNascimento", dataNascimento.Value.Date));
-
-    // Se nenhum filtro: retorna tudo
-    if (string.IsNullOrWhiteSpace(nome) && string.IsNullOrWhiteSpace(email) && !idade.HasValue && !dataNascimento.HasValue)
-        resultados = repo.Listar();
-
-    // remove duplicados pelo Id
-    var unicos = resultados
-        .GroupBy(a => a.Id)
-        .Select(g => g.First())
-        .OrderBy(a => a.Id)
-        .ToList();
-
-    return Results.Ok(unicos);
-})
-.Produces<List<Aluno>>(StatusCodes.Status200OK);
-
-// CRIAR
-api.MapPost("/", ([FromServices] IRepository<Aluno> repo, [FromBody] AlunoCreateDto dto) =>
-{
-    var erro = Validar(dto);
-    if (erro is not null) return Results.ValidationProblem(erro);
-
-    var novoId = repo.Inserir(dto.Nome.Trim(), dto.Idade, dto.Email.Trim(), dto.DataNascimento.Date);
-    var criado = repo.Buscar("Id", novoId).First(); // deve existir após inserir
-
-    return Results.Created($"/api/alunos/{novoId}", criado);
+    var id = repo.Inserir(dto.Nome.Trim(), dto.Idade, dto.Email.Trim(), dto.DataNascimento.Date);
+    var created = repo.Buscar("Id", id).First();
+    return Results.Created($"/api/v2/alunos/{id}", created);
 })
 .Produces<Aluno>(StatusCodes.Status201Created)
 .ProducesProblem(StatusCodes.Status400BadRequest);
 
-// ATUALIZAR
-api.MapPut("/{id:int}", ([FromServices] IRepository<Aluno> repo, int id, [FromBody] AlunoUpdateDto dto) =>
+// Atualizar
+v2.MapPut("/{id:int}", (IRepository<Aluno> repo, int id, [FromBody] AlunoUpdateDto dto) =>
 {
-    var existente = repo.Buscar("Id", id).FirstOrDefault();
-    if (existente is null) return Results.NotFound();
+    var existe = repo.Buscar("Id", id).FirstOrDefault();
+    if (existe is null) return Results.NotFound();
 
-    var erro = Validar(dto);
-    if (erro is not null) return Results.ValidationProblem(erro);
+    if (!Valid(new AlunoCreateDto(dto.Nome, dto.Idade, dto.Email, dto.DataNascimento), out var err))
+        return Results.ValidationProblem(err);
 
     var linhas = repo.Atualizar(id, dto.Nome.Trim(), dto.Idade, dto.Email.Trim(), dto.DataNascimento.Date);
     if (linhas == 0) return Results.NotFound();
 
-    var atualizado = repo.Buscar("Id", id).First();
-    return Results.Ok(atualizado);
+    var updated = repo.Buscar("Id", id).First();
+    return Results.Ok(updated);
 })
 .Produces<Aluno>(StatusCodes.Status200OK)
 .Produces(StatusCodes.Status404NotFound)
 .ProducesProblem(StatusCodes.Status400BadRequest);
 
-// EXCLUIR
-api.MapDelete("/{id:int}", ([FromServices] IRepository<Aluno> repo, int id) =>
+// Excluir (exige role admin)
+v2.MapDelete("/{id:int}", (IRepository<Aluno> repo, int id) =>
 {
     var linhas = repo.Excluir(id);
     return linhas == 0 ? Results.NotFound() : Results.NoContent();
 })
+.RequireAuthorization("admin")
 .Produces(StatusCodes.Status204NoContent)
 .Produces(StatusCodes.Status404NotFound);
 
 app.Run();
 
-// ====== VALIDAÇÃO BÁSICA ======
-static IDictionary<string, string[]>? Validar(AlunoCreateDto dto)
+// ===================== VALIDAÇÃO =====================
+static bool Valid(AlunoCreateDto dto, out IDictionary<string, string[]>? errors)
 {
-    var erros = new Dictionary<string, string[]>();
-
-    if (string.IsNullOrWhiteSpace(dto.Nome) || dto.Nome.Trim().Length < 3)
-        erros["nome"] = new[] { "Nome é obrigatório e deve ter ao menos 3 caracteres." };
-
-    if (dto.Idade < 0 || dto.Idade > 130)
-        erros["idade"] = new[] { "Idade deve estar entre 0 e 130." };
-
-    if (string.IsNullOrWhiteSpace(dto.Email) || !dto.Email.Contains("@"))
-        erros["email"] = new[] { "Email inválido." };
-
-    if (dto.DataNascimento == default)
-        erros["dataNascimento"] = new[] { "Data de nascimento inválida." };
-
-    return erros.Count == 0 ? null : erros;
-}
-
-static IDictionary<string, string[]>? Validar(AlunoUpdateDto dto)
-{
-    // mesma regra do Create
-    return Validar(new AlunoCreateDto(dto.Nome, dto.Idade, dto.Email, dto.DataNascimento));
+    var e = new Dictionary<string, string[]>();
+    if (string.IsNullOrWhiteSpace(dto.Nome) || dto.Nome.Trim().Length < 3) e["nome"] = new[] { "Mínimo 3 caracteres." };
+    if (dto.Idade < 0 || dto.Idade > 130) e["idade"] = new[] { "0 a 130." };
+    if (string.IsNullOrWhiteSpace(dto.Email) || !dto.Email.Contains("@")) e["email"] = new[] { "Email inválido." };
+    if (dto.DataNascimento == default) e["dataNascimento"] = new[] { "Obrigatório." };
+    errors = e.Count == 0 ? null : e;
+    return errors is null;
 }
