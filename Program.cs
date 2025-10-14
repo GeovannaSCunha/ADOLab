@@ -1,133 +1,187 @@
-﻿using Microsoft.Extensions.Configuration;
-using Microsoft.Data.SqlClient;
+﻿using Microsoft.AspNetCore.Mvc;
+using Microsoft.OpenApi.Models;
 
-#region Config
-// Carrega a connection string do appsettings.json
-var config = new ConfigurationBuilder()
-    .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
-    .AddEnvironmentVariables()
-    .Build();
+// ====== MODELOS / DTOS ======
+public record Aluno(int Id, string Nome, int Idade, string Email, DateTime DataNascimento);
 
-string connString = config.GetConnectionString("SqlServerConnection")
-    ?? throw new InvalidOperationException("ConnectionStrings:SqlServerConnection não encontrada.");
-#endregion
+public record AlunoCreateDto(
+    string Nome,
+    int Idade,
+    string Email,
+    DateTime DataNascimento
+);
 
-var logger = new FileLogger("log.txt");
+public record AlunoUpdateDto(
+    string Nome,
+    int Idade,
+    string Email,
+    DateTime DataNascimento
+);
 
-try
+// ====== CONTRATO DO REPOSITÓRIO ======
+public interface IRepository<T>
 {
-    var alunoRepo = new AlunoRepository(connString);
-    await logger.LogAsync("Iniciando aplicação e garantindo o esquema.");
-    alunoRepo.GarantirEsquema(); // DDL: cria a tabela se não existir
-
-    while (true)
-    {
-        Console.WriteLine("\n=== CRUD ADO.NET – Alunos ===");
-        Console.WriteLine("1) Inserir");
-        Console.WriteLine("2) Listar");
-        Console.WriteLine("3) Editar");
-        Console.WriteLine("4) Deletar");
-        Console.WriteLine("5) Buscar");
-        Console.WriteLine("0) Sair");
-        Console.Write("Escolha: ");
-        var opc = Console.ReadLine();
-
-        if (opc == "0") break;
-
-        switch (opc)
-        {
-            case "1":
-                Console.Write("Nome: "); var nome = Console.ReadLine() ?? "";
-                Console.Write("Idade: "); var idadeStr = Console.ReadLine();
-                Console.Write("Email: "); var email = Console.ReadLine() ?? "";
-                Console.Write("Data de Nascimento (yyyy-MM-dd): "); var dataNascimentoStr = Console.ReadLine();
-
-                if (int.TryParse(idadeStr, out int idade) && DateTime.TryParse(dataNascimentoStr, out DateTime dataNascimento))
-                {
-                    int id = alunoRepo.Inserir(nome, idade, email, dataNascimento);
-                    Console.WriteLine($"✅ Inserido Id={id}");
-                    await logger.LogAsync($"Inserido aluno com Id={id}, Nome={nome}, Idade={idade}, Email={email}, DataNascimento={dataNascimento:yyyy-MM-dd}.");
-                }
-                else
-                {
-                    Console.WriteLine("Dados inválidos.");
-                    await logger.LogWarningAsync("Falha ao inserir aluno devido a dados inválidos.");
-                }
-                break;
-
-            case "2":
-                var alunos = alunoRepo.Listar();
-                Console.WriteLine("== Lista de Alunos ==");
-                foreach (var a in alunos)
-                    Console.WriteLine($"#{a.Id} {a.Nome} ({a.Idade}) - {a.Email} - {a.DataNascimento:yyyy-MM-dd}");
-                Console.WriteLine(alunos.Count == 0 ? "(vazio)" : "");
-                await logger.LogAsync("Listou todos os alunos.");
-                break;
-
-            case "3":
-                Console.Write("Id: "); var idEditStr = Console.ReadLine();
-                Console.Write("Novo Nome: "); var novoNome = Console.ReadLine() ?? "";
-                Console.Write("Nova Idade: "); var novaIdadeStr = Console.ReadLine();
-                Console.Write("Novo Email: "); var novoEmail = Console.ReadLine() ?? "";
-                Console.Write("Nova Data de Nascimento (yyyy-MM-dd): "); var novaDataNascimentoStr = Console.ReadLine();
-
-                if (int.TryParse(idEditStr, out int idEdit) && int.TryParse(novaIdadeStr, out int novaIdade) && DateTime.TryParse(novaDataNascimentoStr, out DateTime novaDataNascimento))
-                {
-                    int rows = alunoRepo.Atualizar(idEdit, novoNome, novaIdade, novoEmail, novaDataNascimento);
-                    Console.WriteLine(rows > 0 ? "✅ Atualizado." : "⚠️ Nenhum registro afetado.");
-                    await logger.LogAsync(rows > 0
-                        ? $"Atualizado aluno Id={idEdit} com Nome={novoNome}, Idade={novaIdade}, Email={novoEmail}, DataNascimento={novaDataNascimento:yyyy-MM-dd}."
-                        : $"Nenhum registro atualizado para Id={idEdit}.");
-                }
-                else
-                {
-                    Console.WriteLine("Dados inválidos.");
-                    await logger.LogWarningAsync("Falha ao atualizar aluno devido a dados inválidos.");
-                }
-                break;
-
-            case "4":
-                Console.Write("Id: "); var idDelStr = Console.ReadLine();
-                if (int.TryParse(idDelStr, out int idDel))
-                {
-                    int rows = alunoRepo.Excluir(idDel);
-                    Console.WriteLine(rows > 0 ? "✅ Deletado." : "⚠️ Nenhum registro afetado.");
-                    await logger.LogAsync(rows > 0
-                        ? $"Deletado aluno com Id={idDel}."
-                        : $"Nenhum registro deletado para Id={idDel}.");
-                }
-                else
-                {
-                    Console.WriteLine("Id inválido.");
-                    await logger.LogWarningAsync("Falha ao deletar aluno devido a Id inválido.");
-                }
-                break;
-
-            case "5":
-                Console.Write("Propriedade (coluna): "); var propriedade = Console.ReadLine() ?? "";
-                Console.Write("Valor: "); var valor = Console.ReadLine() ?? "";
-                var resultados = alunoRepo.Buscar(propriedade, valor);
-                Console.WriteLine("== Resultados da Busca ==");
-                foreach (var r in resultados)
-                    Console.WriteLine($"#{r.Id} {r.Nome} ({r.Idade}) - {r.Email} - {r.DataNascimento:yyyy-MM-dd}");
-                Console.WriteLine(resultados.Count == 0 ? "(vazio)" : "");
-                await logger.LogAsync($"Buscou pela propriedade '{propriedade}' com valor '{valor}'.");
-                break;
-
-            default:
-                Console.WriteLine("Opção inválida.");
-                await logger.LogWarningAsync("Opção de menu inválida selecionada.");
-                break;
-        }
-    }
+    // Métodos que você já tem no seu projeto
+    int Inserir(string nome, int idade, string email, DateTime dataNascimento);
+    List<Aluno> Listar();
+    int Atualizar(int id, string nome, int idade, string email, DateTime dataNascimento);
+    int Excluir(int id);
+    List<Aluno> Buscar(string propriedade, object valor);
+    void GarantirEsquema();
 }
-catch (SqlException ex)
+
+// ====== SUA IMPLEMENTAÇÃO EXISTENTE ======
+// AlunoRepository: a mesma que você já criou (ADO.NET/SqlClient)
+// (coloque a sua classe AlunoRepository aqui ou no arquivo próprio)
+
+var builder = WebApplication.CreateBuilder(args);
+
+// Conexão
+var connString = builder.Configuration.GetConnectionString("DefaultConnection")
+                  ?? "Server=localhost;Database=ADOLab;Trusted_Connection=True;TrustServerCertificate=True;";
+
+// DI
+builder.Services.AddSingleton<IRepository<Aluno>>(sp =>
 {
-    Console.WriteLine($"[ERRO SQL] {ex.Number} - {ex.Message}");
-    await logger.LogErrorAsync($"Erro SQL {ex.Number}: {ex.Message}");
+    var repo = new AlunoRepository(connString);
+    repo.GarantirEsquema();
+    return repo;
+});
+
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen(c =>
+{
+    c.SwaggerDoc("v1", new OpenApiInfo { Title = "Alunos API", Version = "v1" });
+});
+
+var app = builder.Build();
+
+app.UseSwagger();
+app.UseSwaggerUI();
+
+app.MapGet("/", () => Results.Redirect("/swagger")).ExcludeFromDescription();
+
+// ====== GRUPO /api/alunos ======
+var api = app.MapGroup("/api/alunos").WithTags("Alunos");
+
+// LISTAR
+api.MapGet("/", ([FromServices] IRepository<Aluno> repo) =>
+{
+    var itens = repo.Listar();
+    return Results.Ok(itens);
+})
+.Produces<List<Aluno>>(StatusCodes.Status200OK);
+
+// OBTER POR ID
+api.MapGet("/{id:int}", ([FromServices] IRepository<Aluno> repo, int id) =>
+{
+    var item = repo.Buscar("Id", id).FirstOrDefault();
+    return item is null ? Results.NotFound() : Results.Ok(item);
+})
+.Produces<Aluno>(StatusCodes.Status200OK)
+.Produces(StatusCodes.Status404NotFound);
+
+// BUSCAR (filtros opcionais)
+api.MapGet("/search", (
+    [FromServices] IRepository<Aluno> repo,
+    string? nome,
+    string? email,
+    int? idade,
+    DateTime? dataNascimento
+) =>
+{
+    var resultados = new List<Aluno>();
+
+    if (!string.IsNullOrWhiteSpace(nome))
+        resultados.AddRange(repo.Buscar("Nome", nome));
+    if (!string.IsNullOrWhiteSpace(email))
+        resultados.AddRange(repo.Buscar("Email", email));
+    if (idade.HasValue)
+        resultados.AddRange(repo.Buscar("Idade", idade.Value));
+    if (dataNascimento.HasValue)
+        resultados.AddRange(repo.Buscar("DataNascimento", dataNascimento.Value.Date));
+
+    // Se nenhum filtro: retorna tudo
+    if (string.IsNullOrWhiteSpace(nome) && string.IsNullOrWhiteSpace(email) && !idade.HasValue && !dataNascimento.HasValue)
+        resultados = repo.Listar();
+
+    // remove duplicados pelo Id
+    var unicos = resultados
+        .GroupBy(a => a.Id)
+        .Select(g => g.First())
+        .OrderBy(a => a.Id)
+        .ToList();
+
+    return Results.Ok(unicos);
+})
+.Produces<List<Aluno>>(StatusCodes.Status200OK);
+
+// CRIAR
+api.MapPost("/", ([FromServices] IRepository<Aluno> repo, [FromBody] AlunoCreateDto dto) =>
+{
+    var erro = Validar(dto);
+    if (erro is not null) return Results.ValidationProblem(erro);
+
+    var novoId = repo.Inserir(dto.Nome.Trim(), dto.Idade, dto.Email.Trim(), dto.DataNascimento.Date);
+    var criado = repo.Buscar("Id", novoId).First(); // deve existir após inserir
+
+    return Results.Created($"/api/alunos/{novoId}", criado);
+})
+.Produces<Aluno>(StatusCodes.Status201Created)
+.ProducesProblem(StatusCodes.Status400BadRequest);
+
+// ATUALIZAR
+api.MapPut("/{id:int}", ([FromServices] IRepository<Aluno> repo, int id, [FromBody] AlunoUpdateDto dto) =>
+{
+    var existente = repo.Buscar("Id", id).FirstOrDefault();
+    if (existente is null) return Results.NotFound();
+
+    var erro = Validar(dto);
+    if (erro is not null) return Results.ValidationProblem(erro);
+
+    var linhas = repo.Atualizar(id, dto.Nome.Trim(), dto.Idade, dto.Email.Trim(), dto.DataNascimento.Date);
+    if (linhas == 0) return Results.NotFound();
+
+    var atualizado = repo.Buscar("Id", id).First();
+    return Results.Ok(atualizado);
+})
+.Produces<Aluno>(StatusCodes.Status200OK)
+.Produces(StatusCodes.Status404NotFound)
+.ProducesProblem(StatusCodes.Status400BadRequest);
+
+// EXCLUIR
+api.MapDelete("/{id:int}", ([FromServices] IRepository<Aluno> repo, int id) =>
+{
+    var linhas = repo.Excluir(id);
+    return linhas == 0 ? Results.NotFound() : Results.NoContent();
+})
+.Produces(StatusCodes.Status204NoContent)
+.Produces(StatusCodes.Status404NotFound);
+
+app.Run();
+
+// ====== VALIDAÇÃO BÁSICA ======
+static IDictionary<string, string[]>? Validar(AlunoCreateDto dto)
+{
+    var erros = new Dictionary<string, string[]>();
+
+    if (string.IsNullOrWhiteSpace(dto.Nome) || dto.Nome.Trim().Length < 3)
+        erros["nome"] = new[] { "Nome é obrigatório e deve ter ao menos 3 caracteres." };
+
+    if (dto.Idade < 0 || dto.Idade > 130)
+        erros["idade"] = new[] { "Idade deve estar entre 0 e 130." };
+
+    if (string.IsNullOrWhiteSpace(dto.Email) || !dto.Email.Contains("@"))
+        erros["email"] = new[] { "Email inválido." };
+
+    if (dto.DataNascimento == default)
+        erros["dataNascimento"] = new[] { "Data de nascimento inválida." };
+
+    return erros.Count == 0 ? null : erros;
 }
-catch (Exception ex)
+
+static IDictionary<string, string[]>? Validar(AlunoUpdateDto dto)
 {
-    Console.WriteLine($"[ERRO] {ex.Message}");
-    await logger.LogErrorAsync($"Exceção não tratada: {ex.Message}");
+    // mesma regra do Create
+    return Validar(new AlunoCreateDto(dto.Nome, dto.Idade, dto.Email, dto.DataNascimento));
 }
