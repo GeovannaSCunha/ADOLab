@@ -2,12 +2,12 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
 
 // ===================== MODELOS & DTOS =====================
-
 public record Aluno(int Id, string Nome, int Idade, string Email, DateTime DataNascimento);
 
 public record AlunoCreateDto(string Nome, int Idade, string Email, DateTime DataNascimento);
@@ -19,7 +19,6 @@ public record LoginDto(string Email, string Senha);
 public record TokenDto(string access_token, DateTime expires_at);
 
 // ===================== CONTRATOS =====================
-
 public interface IRepository<T>
 {
     int Inserir(string nome, int idade, string email, DateTime dataNascimento);
@@ -42,8 +41,7 @@ public interface IJwtTokenService
     TokenDto Gerar(Usuario u);
 }
 
-// ===================== IMPLEMENTAÇÕES DE AUTH (SIMPLES) =====================
-// Repo de usuário em memória (troque por SQL quando quiser)
+// ===================== AUTH (implementação simples) =====================
 public class UsuarioRepository : IUsuarioRepository
 {
     private readonly List<Usuario> _db = new();
@@ -101,27 +99,57 @@ public class JwtTokenService : IJwtTokenService
     }
 }
 
-// ===================== APP =====================
+// ===================== EF CORE =====================
+public class EscolaContext : DbContext
+{
+    public EscolaContext(DbContextOptions<EscolaContext> options) : base(options) { }
 
+    public DbSet<Aluno> Alunos => Set<Aluno>();
+    protected override void OnModelCreating(ModelBuilder mb)
+    {
+        base.OnModelCreating(mb);
+
+        // Mantém compatibilidade com a tabela já existente "Alunos"
+        mb.Entity<Aluno>(e =>
+        {
+            e.ToTable("Alunos");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Nome).HasMaxLength(100).IsRequired();
+            e.Property(x => x.Email).HasMaxLength(100).IsRequired();
+            e.Property(x => x.Idade).IsRequired();
+            e.Property(x => x.DataNascimento).IsRequired();
+        });
+
+        // Quando você criar Professor/Disciplina/Matricula, registre aqui também.
+        // Exemplo (quando tiver as classes):
+        // mb.Entity<Professor>(...);
+        // mb.Entity<Disciplina>(...);
+        // mb.Entity<Matricula>(...);
+    }
+}
+
+// ===================== APP =====================
 var builder = WebApplication.CreateBuilder(args);
 
-// 1) Conexão (vem do appsettings.json)
+// 1) Connection string
 var connString = builder.Configuration.GetConnectionString("DefaultConnection")
     ?? "Server=localhost;Database=ADOLab;Trusted_Connection=True;TrustServerCertificate=True;";
 
-// 2) DI dos repositórios
-// IMPORTANT: Ajuste o namespace/using do seu AlunoRepository
+// 2) EF Core
+builder.Services.AddDbContext<EscolaContext>(opt => opt.UseSqlServer(connString));
+
+// 3) DI do repositório ADO.NET que você já tem (ajuste o namespace/using da sua classe AlunoRepository)
 builder.Services.AddSingleton<IRepository<Aluno>>(_ =>
 {
-    var repo = new AlunoRepository(connString);
+    var repo = new AlunoRepository(connString); // sua implementação ADO.NET
     repo.GarantirEsquema();
     return repo;
 });
 
+// 4) Auth/JWT
 builder.Services.AddSingleton<IUsuarioRepository, UsuarioRepository>();
 builder.Services.AddSingleton<IJwtTokenService, JwtTokenService>();
 
-// 3) Auth/JWT
 var key = builder.Configuration["Jwt:Key"] ?? throw new InvalidOperationException("Configure Jwt:Key");
 var issuer = builder.Configuration["Jwt:Issuer"] ?? throw new InvalidOperationException("Configure Jwt:Issuer");
 var audience = builder.Configuration["Jwt:Audience"] ?? throw new InvalidOperationException("Configure Jwt:Audience");
@@ -145,15 +173,15 @@ builder.Services
 
 builder.Services.AddAuthorization(o =>
 {
-    // Exemplo de política para endpoints admin (usado no DELETE)
+    // Política opcional para admin (usada no DELETE)
     o.AddPolicy("admin", p => p.RequireRole("admin"));
 });
 
-// 4) Swagger
+// 5) Swagger
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>
 {
-    c.SwaggerDoc("v2", new OpenApiInfo { Title = "Alunos API V2 (JWT)", Version = "v2" });
+    c.SwaggerDoc("v2", new OpenApiInfo { Title = "Alunos API V2 (JWT + EF Core)", Version = "v2" });
     c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
     {
         Description = "JWT Bearer. Ex.: Bearer {seu_token}",
@@ -178,8 +206,7 @@ app.UseAuthorization();
 
 app.MapGet("/", () => Results.Redirect("/swagger")).ExcludeFromDescription();
 
-// ===================== ROTAS AUTH =====================
-
+// ===================== AUTH =====================
 var auth = app.MapGroup("/api/auth").WithTags("Auth");
 
 // Registro de usuário
@@ -192,7 +219,6 @@ auth.MapPost("/register", ([FromBody] RegisterDto dto, IUsuarioRepository users)
         return Results.Conflict("Email já cadastrado.");
 
     var hash = BCrypt.Net.BCrypt.HashPassword(dto.Senha);
-    // Dica: para ter um admin, troque role para "admin" aqui.
     var id = users.Criar(dto.Nome.Trim(), dto.Email.Trim(), hash, role: "admin");
     return Results.Created($"/api/users/{id}", new { id, dto.Nome, dto.Email });
 });
@@ -208,8 +234,7 @@ auth.MapPost("/login", ([FromBody] LoginDto dto, IUsuarioRepository users, IJwtT
     return Results.Ok(tk);
 });
 
-// ===================== ROTAS V2 /api/v2/alunos (PROTEGIDAS) =====================
-
+// ===================== API V2 /api/v2/alunos (PROTEGIDA) =====================
 var v2 = app.MapGroup("/api/v2/alunos")
             .WithTags("Alunos V2")
             .RequireAuthorization(); // toda a V2 exige Bearer
@@ -268,9 +293,23 @@ v2.MapDelete("/{id:int}", (IRepository<Aluno> repo, int id) =>
 .Produces(StatusCodes.Status204NoContent)
 .Produces(StatusCodes.Status404NotFound);
 
+// =============== ENDPOINT OPCIONAL: seed EF para validar quickly ===============
+app.MapPost("/seed-ef", async (EscolaContext db) =>
+{
+    // Só para validar que o EF está conectado e salvando.
+    // Se a tabela Alunos já existir/populada, este seed pode ser adaptado.
+    if (!await db.Alunos.AnyAsync())
+    {
+        db.Alunos.Add(new Aluno(0, "Aluno EF", 20, "alunoef@ex.com", new DateTime(2005, 1, 10)));
+        await db.SaveChangesAsync();
+    }
+    return Results.Ok("EF OK");
+}).WithTags("Dev");
+
+// ======================================================================
 app.Run();
 
-// ===================== VALIDAÇÃO =====================
+// ===================== VALIDAÇÃO DTO =====================
 static bool Valid(AlunoCreateDto dto, out IDictionary<string, string[]>? errors)
 {
     var e = new Dictionary<string, string[]>();
